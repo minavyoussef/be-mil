@@ -1,0 +1,2 @@
+Date,Open,High,Low,Close,Volume,OpenInt
+20200123,25.03,25.03,24.98,24.9919,6801,0
