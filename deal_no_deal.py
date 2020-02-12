@@ -1,25 +1,33 @@
 #!/usr/bin/env python
-# coding: utf-8
-
-# In[4]:
-
-
+import collections
 import os
 
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from sklearn.preprocessing import StandardScaler
+from torch import nn, optim
 
 DATA_DIR = './data'
 RESOLUTION = 'daily'
 REGION = 'us'
-INSTRUMENT = './nyse stocks/2/unh.us.txt'
+INSTRUMENT = 'unh'
+INSTRUMENT_PATH = './nyse stocks/2/unh.us.txt'
 
-ohlc = ['open', 'high', 'low', 'close']
-target_col = 'close'
+raw_data_features_set = ['open', 'high', 'low', 'close']
+raw_target = 'close'
 
-data_file = os.path.normpath(os.path.join(DATA_DIR, RESOLUTION, REGION, INSTRUMENT))
+features_set = ['volume',
+                'high_open_delta',
+                'low_close_delta',
+                'high_low_delta',
+                'open_close_delta',
+                'high_close_delta',
+                'low_open_delta']
+target = ['close_delta']
+
+data_file = os.path.normpath(os.path.join(DATA_DIR, RESOLUTION, REGION, INSTRUMENT_PATH))
 
 df = pd.read_csv(data_file)
 df.columns = ['date', 'open', 'high', 'low', 'close', 'volume', 'openint']
@@ -35,23 +43,16 @@ df['open_close_delta'] = df['open'] - df['close']
 df['high_close_delta'] = df['high'] - df['close']
 df['low_open_delta'] = df['low'] - df['open']
 
-df[f'{target_col}_t1'] = df[target_col].shift(-1)
-df[f'{target_col}_delta'] = df[f'{target_col}_t1'] - df[target_col]
+df[f'{raw_target}_t1'] = df[raw_target].shift(-1)
+df[f'{raw_target}_delta'] = df[f'{raw_target}_t1'] - df[raw_target]
 
-df[['volume']] = StandardScaler().fit_transform(df[['volume']])
+for feature in features_set:
+    df[feature] = StandardScaler().fit_transform(df[[feature]])
+df[f'{raw_target}_delta'] = StandardScaler().fit_transform(df[[f'{raw_target}_delta']])
 
-df.drop([f'{target_col}_t1'], axis=1, inplace=True)
-df.drop(ohlc + ['date', 'openint'], axis=1, inplace=True)
+df.drop([f'{raw_target}_t1'], axis=1, inplace=True)
+df.drop(raw_data_features_set + ['date', 'openint'], axis=1, inplace=True)
 df = df[:-1]
-
-features = ['volume',
-            'high_open_delta',
-            'low_close_delta',
-            'high_low_delta',
-            'open_close_delta',
-            'high_close_delta',
-            'low_open_delta']
-torch_tensor = torch.tensor(df[features].values)
 
 
 def chunks(lst, n):
@@ -178,7 +179,7 @@ def train_dataset_generator(df, shift_range=21, repeat_out=2):
     return train_dataset
 
 
-train_dataset = train_dataset_generator(df, shift_range=5, repeat_out=1000)
+train_dataset = train_dataset_generator(df, shift_range=5, repeat_out=100)
 
 
 def pad_dataset_sequence(dataset):
@@ -199,6 +200,125 @@ def pad_dataset_sequence(dataset):
     return dataset
 
 
+print(collections.Counter([len(e) for e in train_dataset]))
 train_dataset = pad_dataset_sequence(train_dataset)
-for e in train_dataset:
-    print(len(e))
+print(collections.Counter([len(e) for e in train_dataset]))
+
+# Hyper-params
+
+param_epochs = 200
+param_batch_size = 1
+
+param_input_size = 7
+param_sequence_size = 658
+param_layers_size = 1
+param_hidden_size = 1
+param_dropout = 0.05
+param_dense_1 = 1024
+param_dense_2 = 512
+param_dense_3 = 128
+param_output_size = 1
+
+gpu_enabled = torch.cuda.is_available()
+device = torch.device("cuda") if gpu_enabled else torch.device("cpu")
+
+param_lr = 0.01
+
+
+class SingleInstrumentPredictorRNN(nn.Module):
+
+    def __init__(self):
+        super(SingleInstrumentPredictorRNN, self).__init__()
+
+        self._rnn = nn.RNN(param_input_size, param_hidden_size, param_layers_size, batch_first=True)
+
+        self._fc_1 = nn.Linear(param_sequence_size, param_dense_1)
+        self._fc_2 = nn.Linear(param_dense_1, param_dense_2)
+        self._fc_3 = nn.Linear(param_dense_2, param_dense_3)
+        self._fc_4 = nn.Linear(param_dense_3, param_sequence_size)
+
+    def forward(self, input):
+        batch_size = input.size(0)
+
+        hidden = self.init_hidden(batch_size)
+        out, hidden = self._rnn(input.double(), hidden.double())
+
+        out = out.view(-1, param_sequence_size)
+
+        out = F.relu(self._fc_1(out))
+        out = F.relu(self._fc_2(out))
+        out = F.relu(self._fc_3(out))
+        out = self._fc_4(out)
+
+        return out, hidden
+
+    def init_hidden(self, batch_size):
+        return torch.rand(param_layers_size, batch_size, param_hidden_size, dtype=torch.double)
+
+
+model = SingleInstrumentPredictorRNN()
+model = model.double()
+
+criterion = nn.MSELoss()
+optimizer = optim.SGD(model.parameters(), lr=param_lr)
+
+if gpu_enabled:
+    model.cuda()
+    print('GPU Enabled Model')
+else:
+    print('GPU Disabled Model')
+
+
+def tensorify_example(example):
+    example_df = pd.DataFrame(example)
+
+    features_tensor = torch.tensor(example_df[features_set].values, dtype=torch.double)
+    features_tensor = features_tensor.unsqueeze(0)
+
+    target_tensor = torch.tensor(example_df[target].values, dtype=torch.double)
+    target_tensor = target_tensor.view(1, -1)
+
+    #  features_tensor.size() # torch.Size([1, 658, 7])
+    # target_tensor.size() # torch.Size([1, 658])
+    return features_tensor, target_tensor
+
+
+def batch_tensorify(examples_batch):
+    features_tensors_list = [tensorify_example(example)[0] for example in examples_batch]
+    target_tensors_list = [tensorify_example(example)[1] for example in examples_batch]
+
+    return torch.cat(features_tensors_list, 0), torch.cat(target_tensors_list, 0)
+
+
+def batch(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
+
+
+for epoch in range(1, param_epochs + 1):
+
+    loss = 0
+    for batch_examples in batch(train_dataset, param_batch_size):
+
+        batch_features, batch_target = batch_tensorify(batch_examples)
+        batch_features, batch_target = batch_features.double(), batch_target.double()
+
+        if gpu_enabled:
+            input_batch = input_batch.cuda()
+            labels_batch = labels_batch.cuda()
+
+        optimizer.zero_grad()
+
+        batch_features.to(device)
+        batch_target.to(device)
+
+        output, hidden = model(batch_features.double())
+
+        loss = criterion(output, batch_target)
+        loss.backward()
+        optimizer.step()
+
+    print(f'Epoch: {epoch}/{param_epochs} ............. Loss: {loss.item()}')
+
+torch.save(model.state_dict(), f'./{INSTRUMENT}_{param_epochs}epochs_model_state.pt')
