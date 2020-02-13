@@ -215,8 +215,8 @@ param_layers_size = 1
 param_hidden_size = 1
 param_dropout = 0.05
 param_dense_1 = 1024
-param_dense_2 = 512
-param_dense_3 = 128
+param_dense_2 = 1024
+param_dense_3 = 1024
 param_output_size = 1
 
 gpu_enabled = torch.cuda.is_available()
@@ -298,7 +298,7 @@ def batch(iterable, n=1):
 
 for epoch in range(1, param_epochs + 1):
 
-    loss = 0
+    epoch_loss = 0.0
     for batch_examples in batch(train_dataset, param_batch_size):
 
         batch_features, batch_target = batch_tensorify(batch_examples)
@@ -316,9 +316,13 @@ for epoch in range(1, param_epochs + 1):
         output, hidden = model(batch_features.double())
 
         loss = criterion(output, batch_target)
+        epoch_loss += loss.item()
+
         loss.backward()
         optimizer.step()
 
-    print(f'Epoch: {epoch}/{param_epochs} ............. Loss: {loss.item()}')
+    print(f'Epoch: {epoch}/{param_epochs} ............. Loss: {epoch_loss}')
 
 torch.save(model.state_dict(), f'./{INSTRUMENT}_{param_epochs}epochs_model_state.pt')
+
+
