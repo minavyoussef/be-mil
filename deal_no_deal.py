@@ -179,7 +179,7 @@ def train_dataset_generator(df, shift_range=21, repeat_out=2):
     return train_dataset
 
 
-train_dataset = train_dataset_generator(df, shift_range=5, repeat_out=100)
+train_dataset = train_dataset_generator(df, shift_range=5, repeat_out=1000)
 
 
 def pad_dataset_sequence(dataset):
